@@ -32,6 +32,28 @@
 #include "schemaful/IsSchemafulReader.hpp"
 #include "schemaful/IsSchemafulWriter.hpp"
 
+template <auto Start, auto End, class F>
+constexpr void constexpr_for(F&& f)
+{
+    if constexpr (Start < End)
+    {
+        f(std::integral_constant<decltype(Start), Start>());
+        constexpr_for<Start + 1, End>(f);
+    }
+}
+
+namespace rfl
+{
+    template<class T>
+    struct Accessor;
+
+    template <typename Type>
+    concept has_accessor = requires(Type&& item)
+	{
+        Accessor<Type>::Input(item);
+    };
+}
+
 namespace rfl::parsing {
 
 /// Default case - anything that cannot be explicitly matched.
@@ -57,6 +79,23 @@ struct Parser {
                     ProcessorsType>::read(_r, _var)
           .and_then(wrap_in_t);
 
+    } else if constexpr (rfl::has_accessor<T>) {
+        Result named_tuple = Parser<R, W, decltype(Accessor<T>::Input(std::declval<T&>())),
+            ProcessorsType>::read(_r, _var);
+
+        if (!named_tuple.has_value())
+            return error(named_tuple.error().what());
+
+        T t{};
+        auto accessor = rfl::Accessor<T>::Input(t);
+
+        constexpr_for<0, accessor.size()>([&](auto i)
+        {
+	        *accessor.template get<i>() = *named_tuple->template get<i>();
+        });
+        
+        return t;
+	    
     } else if constexpr (schemaful::IsSchemafulReader<R> &&
                          internal::is_literal_v<T>) {
       return _r.template to_basic_type<T>(_var);
@@ -106,6 +145,10 @@ struct Parser {
     if constexpr (internal::has_write_reflector<T>) {
       Parser<R, W, typename Reflector<T>::ReflType, ProcessorsType>::write(
           _w, Reflector<T>::from(_var), _parent);
+
+    } else if constexpr (rfl::has_accessor<T>) {
+      Parser<R, W, decltype(Accessor<T>::Input(std::declval<T&>())), ProcessorsType>::write(
+          _w, Accessor<T>::Input(const_cast<T&>(_var)), _parent);
 
     } else if constexpr (schemaful::IsSchemafulWriter<W> &&
                          internal::is_literal_v<T>) {
